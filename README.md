@@ -5,7 +5,7 @@
 <p align="center">GNOME forgets everything when you log out. This brings it back with one click:<br>
 your apps, where their windows were, and your Claude Code chats.</p>
 
-<p align="center"><img src="docs/restore.svg" alt="A Restore 3 items button in the top bar; a browser and two terminals reopen in the dashed outlines of their old positions, the terminals resuming Claude Code chats"></p>
+<p align="center"><img src="docs/restore.svg" alt="A Restore 3 apps button in the top bar; a browser and two terminals reopen in the dashed outlines of their old positions, the terminals resuming Claude Code chats"></p>
 
 ## What it does
 
@@ -17,6 +17,8 @@ your apps, where their windows were, and your Claude Code chats.</p>
 - **Brings back Claude Code chats.** Every [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
   chat that was running reopens in its own terminal window, in the same folder, with its
   full history (`claude --resume`).
+- **Survives reboots and reloads.** The offer is kept for the login it belongs to until you
+  click it or it times out, even if the screen locks or GNOME reloads its extensions.
 - **Gets out of the way.** The button uses your accent color (Settings → Appearance) and
   disappears 3 minutes after you start opening apps yourself. Apps that start
   automatically at login don't count. Locking and unlocking the screen doesn't bring it back.

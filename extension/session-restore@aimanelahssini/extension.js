@@ -11,6 +11,9 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 const HOME = GLib.get_home_dir();
 const STATE_DIR = GLib.build_filenamev([HOME, '.local', 'state', 'session-restore']);
 const SNAPSHOT = GLib.build_filenamev([STATE_DIR, 'snapshot.json']);
+// The previous login's snapshot, set aside for this login until Restore is clicked or the
+// button times out, so a later save, lock/unlock or extension reload can't lose it.
+const PENDING = GLib.build_filenamev([STATE_DIR, 'pending.json']);
 const CLAUDE_SESSIONS = GLib.build_filenamev([HOME, '.claude', 'sessions']);
 const TERMINAL = 'org.gnome.Ptyxis.desktop';
 const SAVE_DEBOUNCE = 15;       // seconds a change must settle before saving
@@ -26,6 +29,19 @@ function readJson(path) {
     } catch {
         return null;
     }
+}
+
+function log(msg) {
+    console.log(`session-restore: ${msg}`);
+}
+
+// Unique per login: pids repeat across boots, the boot id doesn't.
+function sessionKey() {
+    let boot = '';
+    try {
+        boot = new TextDecoder().decode(GLib.file_get_contents('/proc/sys/kernel/random/boot_id')[1]).trim();
+    } catch {}
+    return `${boot}:${new Gio.Credentials().get_unix_pid()}`;
 }
 
 function normalWindows(app) {
@@ -85,13 +101,24 @@ function claudeChats() {
 export default class SessionRestoreExtension extends Extension {
     enable() {
         this._appSystem = Shell.AppSystem.get_default();
-        this._shellPid = new Gio.Credentials().get_unix_pid();
+        this._session = sessionKey();
         this._enabledAt = GLib.get_monotonic_time();
 
-        // Load the previous login's snapshot before we start overwriting it.
-        const snap = readJson(SNAPSHOT);
-        if (snap && snap.shellPid !== this._shellPid && (snap.apps?.length || snap.claude?.length))
-            this._showButton(snap);
+        // Before saving anything, set the previous login's snapshot aside for this login.
+        let pending = readJson(PENDING);
+        if (pending?.session !== this._session) {
+            const snap = readJson(SNAPSHOT);
+            pending = snap && snap.session !== this._session ? {session: this._session, snap} : null;
+            if (pending) {
+                GLib.mkdir_with_parents(STATE_DIR, 0o700);
+                GLib.file_set_contents(PENDING, JSON.stringify(pending));
+                log(`new login; snapshot from ${new Date(snap.savedAt).toISOString()} set aside`);
+            } else {
+                GLib.unlink(PENDING);
+            }
+        }
+        if (pending)
+            this._showButton(pending.snap);
 
         this._stateId = this._appSystem.connect('app-state-changed', (sys, app) => {
             this._scheduleSave();
@@ -137,16 +164,47 @@ export default class SessionRestoreExtension extends Extension {
         if (!apps.length && !claude.length)
             return;     // never replace a good snapshot with an empty desktop
         GLib.mkdir_with_parents(STATE_DIR, 0o700);
-        const data = {shellPid: this._shellPid, savedAt: Date.now(), apps, claude};
+        const data = {session: this._session, savedAt: Date.now(), apps, claude};
         GLib.file_set_contents(SNAPSHOT, JSON.stringify(data, null, 1));
+    }
+
+    // What Restore would open right now: apps that aren't running yet, and Claude chats that
+    // aren't open. Terminal windows that held chats come back with those chats, so they
+    // aren't opened (or counted) a second time.
+    _plan(snap) {
+        const open = new Set(claudeChats().map(c => c.sessionId));
+        const allChats = snap.claude || [];
+        const chats = allChats.filter(c => !open.has(c.sessionId));
+        const apps = (snap.apps || []).filter(a => {
+            if (a.id === TERMINAL && a.windows <= allChats.length)
+                return false;
+            const app = this._appSystem.lookup_app(a.id);
+            return app && app.state === Shell.AppState.STOPPED;
+        });
+        return {apps, chats};
+    }
+
+    _dismiss() {
+        GLib.unlink(PENDING);
+        this._button?.destroy();
+        this._button = null;
+        if (this._hideId)
+            GLib.source_remove(this._hideId);
+        this._hideId = null;
     }
 
     _showButton(snap) {
         this._snap = snap;
-        const n = (snap.apps?.length || 0) + (snap.claude?.length || 0);
+        const {apps, chats} = this._plan(snap);
+        const n = apps.length + chats.length;
+        log(`restore offers ${n}: ${[...apps.map(a => a.id), ...chats.map(c => `claude ${c.sessionId.slice(0, 8)}`)].join(', ')}`);
+        if (n === 0) {
+            GLib.unlink(PENDING);
+            return;
+        }
         this._button = new PanelMenu.Button(0.0, 'Session Restore', true);
         const btn = new St.Button({style_class: 'session-restore-btn',
-            label: `↻ Restore ${n} ${n === 1 ? 'item' : 'items'}`, y_align: Clutter.ActorAlign.CENTER});
+            label: `↻ Restore ${n} ${n === 1 ? 'app' : 'apps'}`, y_align: Clutter.ActorAlign.CENTER});
         btn.connect('clicked', () => this._restore());
         this._button.add_child(btn);
         Main.panel.addToStatusArea(`${this.uuid}-btn`, this._button, 1, 'left');
@@ -159,8 +217,8 @@ export default class SessionRestoreExtension extends Extension {
             return;
         this._hideId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, HIDE_AFTER, () => {
             this._hideId = null;
-            this._button?.destroy();
-            this._button = null;
+            log('button timed out');
+            this._dismiss();
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -206,18 +264,12 @@ export default class SessionRestoreExtension extends Extension {
     _restore() {
         this._restoring = true;
         const snap = this._snap;
+        const {apps, chats} = this._plan(snap);
+        log(`restoring ${apps.length} app(s) and ${chats.length} chat(s)`);
         this._startPlacing(snap.apps || []);
-        const chats = snap.claude || [];
-        for (const {id, windows} of snap.apps || []) {
-            // Terminal windows that held Claude chats get reopened below with the chat in them.
-            if (id === TERMINAL && windows <= chats.length)
-                continue;
+        for (const {id} of apps)
             this._appSystem.lookup_app(id)?.activate();
-        }
-        const open = new Set(claudeChats().map(c => c.sessionId));
         for (const {sessionId, cwd} of chats) {
-            if (open.has(sessionId))
-                continue;   // already running in a terminal; a second copy would clash
             const cmd = `claude --resume ${GLib.shell_quote(sessionId)}; exec bash`;
             try {
                 Gio.Subprocess.new(['ptyxis', '--new-window', '-d', cwd, '--', 'bash', '-lic', cmd],
@@ -226,10 +278,6 @@ export default class SessionRestoreExtension extends Extension {
                 Main.notify('Session restore', `Could not reopen Claude chat: ${e.message}`);
             }
         }
-        this._button?.destroy();
-        this._button = null;
-        if (this._hideId)
-            GLib.source_remove(this._hideId);
-        this._hideId = null;
+        this._dismiss();
     }
 }

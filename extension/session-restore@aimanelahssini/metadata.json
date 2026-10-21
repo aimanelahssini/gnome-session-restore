@@ -1,0 +1,9 @@
+{
+  "uuid": "session-restore@aimanelahssini",
+  "name": "Session Restore",
+  "description": "After login, one click reopens your apps, puts windows back where they were and resumes your Claude Code chats.",
+  "shell-version": [
+    "50"
+  ],
+  "url": "https://github.com/aimanelahssini/gnome-session-restore"
+}

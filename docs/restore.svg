@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="380" viewBox="0 0 760 380" font-family="Cantarell, 'Inter', 'Segoe UI', sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0l10 5-10 5z" fill="#c38fd6"/></marker>
+  </defs>
+  <rect width="760" height="380" rx="18" fill="#2b2a33"/>
+  <!-- top bar -->
+  <rect x="20" y="20" width="720" height="52" rx="12" fill="#000"/>
+  <rect x="40" y="38" width="28" height="10" rx="5" fill="#fff"/><circle cx="80" cy="43" r="4" fill="#9a9a9a"/><circle cx="93" cy="43" r="4" fill="#9a9a9a"/>
+  <rect x="112" y="28" width="196" height="34" rx="9" fill="#9141ac"/>
+  <text x="210" y="51" fill="#fff" font-size="17" font-weight="bold" text-anchor="middle">↻  Restore 3 items</text>
+  <text x="400" y="52" fill="#fff" font-size="18" font-weight="bold">9:02 AM</text>
+  <!-- desktop -->
+  <rect x="20" y="84" width="720" height="236" rx="12" fill="#3a3842"/>
+  <!-- ghost outlines = remembered spots -->
+  <rect x="44" y="100" width="330" height="200" rx="10" fill="none" stroke="#c38fd6" stroke-width="2" stroke-dasharray="7 6"/>
+  <rect x="396" y="100" width="320" height="94" rx="10" fill="none" stroke="#c38fd6" stroke-width="2" stroke-dasharray="7 6"/>
+  <rect x="396" y="206" width="320" height="94" rx="10" fill="none" stroke="#c38fd6" stroke-width="2" stroke-dasharray="7 6"/>
+  <!-- windows -->
+  <g>
+    <rect x="52" y="108" width="314" height="184" rx="8" fill="#ececec"/>
+    <rect x="52" y="108" width="314" height="26" rx="8" fill="#d6d6d6"/>
+    <circle cx="66" cy="121" r="5" fill="#ff7139"/><text x="80" y="126" fill="#333" font-size="13">Browser</text>
+    <rect x="70" y="150" width="200" height="10" rx="5" fill="#c9c9c9"/><rect x="70" y="170" width="270" height="10" rx="5" fill="#dadada"/><rect x="70" y="190" width="240" height="10" rx="5" fill="#dadada"/>
+  </g>
+  <g>
+    <rect x="404" y="108" width="304" height="78" rx="8" fill="#1e1e1e"/>
+    <text x="418" y="130" fill="#9a9a9a" font-size="13">Terminal</text>
+    <text x="418" y="156" fill="#7fd27f" font-size="14" font-family="monospace">$ claude --resume 1f3c…</text>
+    <text x="418" y="174" fill="#d0d0d0" font-size="13" font-family="monospace">Chat restored, full history</text>
+  </g>
+  <g>
+    <rect x="404" y="214" width="304" height="78" rx="8" fill="#1e1e1e"/>
+    <text x="418" y="236" fill="#9a9a9a" font-size="13">Terminal</text>
+    <text x="418" y="262" fill="#7fd27f" font-size="14" font-family="monospace">$ claude --resume 7b2e…</text>
+    <text x="418" y="280" fill="#d0d0d0" font-size="13" font-family="monospace">Chat restored, full history</text>
+  </g>
+  <path d="M210 66 C 210 80, 200 90, 190 104" stroke="#c38fd6" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+  <!-- captions -->
+  <text x="40" y="346" fill="#e8e6e3" font-size="17">One click after login reopens your apps where they were and resumes your Claude Code chats.</text>
+  <text x="40" y="368" fill="#a9a7a4" font-size="15">The button uses your accent color and disappears 3 minutes after you start opening apps yourself.</text>
+</svg>

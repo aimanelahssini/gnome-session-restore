@@ -13,7 +13,9 @@ your apps, where their windows were, and your Claude Code chats.</p>
   open and where each window is: position, size, workspace, and whether it's maximized,
   fullscreen or minimized.
 - **One-click restore.** After you log in, a **↻ Restore** button appears at the top
-  left. Click it and your apps reopen. Each window goes back to where it was.
+  left. Click it and your apps reopen, each window on the desktop it was on, at the same
+  place and size. Desktops are recreated as needed, and if an app moves its own window
+  right after opening (Firefox does), it's put back.
 - **Brings back Claude Code chats.** Every [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
   chat that was running reopens in its own terminal window, in the same folder, with its
   full history (`claude --resume`).

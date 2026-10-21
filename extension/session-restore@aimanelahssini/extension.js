@@ -21,6 +21,7 @@ const SAVE_PERIOD = 60;         // also save this often (catches new Claude chat
 const HIDE_AFTER = 180;         // button lifetime once you start opening apps
 const LOGIN_GRACE = 10;         // ignore autostart apps right after login
 const PLACE_WINDOW = 120;       // seconds after Restore during which new windows get placed
+const PLACE_AGAIN_MS = 1200;    // apps like Firefox move their own window just after it appears
 
 function readJson(path) {
     try {
@@ -61,11 +62,15 @@ function windowGeometry(w) {
     };
 }
 
-function placeWindow(w, g) {
+function ensureWorkspaces(count) {
     const wm = global.workspace_manager;
+    while (wm.get_n_workspaces() < count)
+        wm.append_new_workspace(false, global.get_current_time());
+}
+
+function placeWindow(w, g) {
     if (g.workspace >= 0) {
-        while (wm.get_n_workspaces() <= g.workspace)
-            wm.append_new_workspace(false, global.get_current_time());
+        ensureWorkspaces(g.workspace + 1);
         w.change_workspace_by_index(g.workspace, false);
     }
     if (w.is_maximized())
@@ -164,7 +169,8 @@ export default class SessionRestoreExtension extends Extension {
         if (!apps.length && !claude.length)
             return;     // never replace a good snapshot with an empty desktop
         GLib.mkdir_with_parents(STATE_DIR, 0o700);
-        const data = {session: this._session, savedAt: Date.now(), apps, claude};
+        const workspaces = global.workspace_manager.get_n_workspaces();
+        const data = {session: this._session, savedAt: Date.now(), workspaces, apps, claude};
         GLib.file_set_contents(SNAPSHOT, JSON.stringify(data, null, 1));
     }
 
@@ -232,22 +238,45 @@ export default class SessionRestoreExtension extends Extension {
             return;
         const tracker = Shell.WindowTracker.get_default();
         this._createdId = global.display.connect('window-created', (d, w) => {
-            const actor = w.get_compositor_private();
-            const place = () => {
+            // A new window starts out as "window:N"; its app is known a moment later.
+            let tries = 0;
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
+                if (!this._pending || !w.get_compositor_private())
+                    return GLib.SOURCE_REMOVE;
                 const id = tracker.get_window_app(w)?.get_id();
-                const queue = this._pending?.get(id);
-                if (w.get_window_type() !== Meta.WindowType.NORMAL || !queue?.length)
-                    return;
-                placeWindow(w, queue.shift());
-            };
-            if (actor)
-                actor.connect('first-frame', place);
-            else
-                place();
+                if (!id?.endsWith('.desktop'))
+                    return ++tries < 33 ? GLib.SOURCE_CONTINUE : GLib.SOURCE_REMOVE;
+                this._place(w, id);
+                return GLib.SOURCE_REMOVE;
+            });
         });
         this._placeTimeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, PLACE_WINDOW, () => {
             this._placeTimeout = null;
             this._stopPlacing();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _place(w, id) {
+        const queue = this._pending?.get(id);
+        if (w.get_window_type() !== Meta.WindowType.NORMAL || !queue?.length)
+            return;
+        const g = queue.shift();
+        placeWindow(w, g);
+        log(`placed ${id} on desktop ${g.workspace + 1} at ${g.x},${g.y} ${g.width}x${g.height}` +
+            `${g.maximized ? ' (maximized)' : ''}`);
+        // Once more shortly after, in case the app repositions itself on startup.
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, PLACE_AGAIN_MS, () => {
+            if (!w.get_compositor_private())
+                return GLib.SOURCE_REMOVE;  // window already closed
+            const r = w.get_frame_rect();
+            const wrongDesk = g.workspace >= 0 && w.get_workspace()?.index() !== g.workspace;
+            const moved = !g.maximized && !g.fullscreen && (r.x !== g.x || r.y !== g.y ||
+                r.width !== g.width || r.height !== g.height);
+            if (wrongDesk || moved) {
+                placeWindow(w, g);
+                log(`re-placed ${id} (the app had moved it)`);
+            }
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -265,7 +294,9 @@ export default class SessionRestoreExtension extends Extension {
         this._restoring = true;
         const snap = this._snap;
         const {apps, chats} = this._plan(snap);
-        log(`restoring ${apps.length} app(s) and ${chats.length} chat(s)`);
+        log(`restoring ${apps.length} app(s) and ${chats.length} chat(s) on ${snap.workspaces ?? '?'} desktop(s)`);
+        if (snap.workspaces)
+            ensureWorkspaces(snap.workspaces);
         this._startPlacing(snap.apps || []);
         for (const {id} of apps)
             this._appSystem.lookup_app(id)?.activate();

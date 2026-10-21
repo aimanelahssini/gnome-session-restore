@@ -214,7 +214,10 @@ export default class SessionRestoreExtension extends Extension {
                 continue;
             this._appSystem.lookup_app(id)?.activate();
         }
+        const open = new Set(claudeChats().map(c => c.sessionId));
         for (const {sessionId, cwd} of chats) {
+            if (open.has(sessionId))
+                continue;   // already running in a terminal; a second copy would clash
             const cmd = `claude --resume ${GLib.shell_quote(sessionId)}; exec bash`;
             try {
                 Gio.Subprocess.new(['ptyxis', '--new-window', '-d', cwd, '--', 'bash', '-lic', cmd],

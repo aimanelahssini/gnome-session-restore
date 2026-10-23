@@ -212,7 +212,17 @@ export default class SessionRestoreExtension extends Extension {
         const btn = new St.Button({style_class: 'session-restore-btn',
             label: `↻ Restore ${n} ${n === 1 ? 'app' : 'apps'}`, y_align: Clutter.ActorAlign.CENTER});
         btn.connect('clicked', () => this._restore());
-        this._button.add_child(btn);
+        // Small × beside the pill: skip restoring for this login.
+        const close = new St.Button({style_class: 'session-restore-close', y_align: Clutter.ActorAlign.CENTER,
+            child: new St.Icon({icon_name: 'window-close-symbolic', icon_size: 10})});
+        close.connect('clicked', () => {
+            log('restore declined');
+            this._dismiss();
+        });
+        const box = new St.BoxLayout({style_class: 'session-restore-box'});
+        box.add_child(btn);
+        box.add_child(close);
+        this._button.add_child(box);
         Main.panel.addToStatusArea(`${this.uuid}-btn`, this._button, 1, 'left');
     }
 

@@ -20,10 +20,11 @@ your apps, where their windows were, and your Claude Code chats.</p>
   chat that was running reopens in its own terminal window, in the same folder, with its
   full history (`claude --resume`).
 - **Survives reboots and reloads.** The offer is kept for the login it belongs to until you
-  click it or it times out, even if the screen locks or GNOME reloads its extensions.
+  click it, dismiss it or it times out, even if the screen locks or GNOME reloads its extensions.
 - **Gets out of the way.** The button uses your accent color (Settings → Appearance) and
   disappears 3 minutes after you start opening apps yourself. Apps that start
   automatically at login don't count. Locking and unlocking the screen doesn't bring it back.
+  Click the small **×** beside it to skip restoring for this login.
 
 ## What it doesn't do
 

@@ -3,3 +3,6 @@
   background-color: -st-accent-color; color: -st-accent-fg-color; font-weight: bold;
 }
 .session-restore-btn:hover { box-shadow: inset 0 0 0 100px rgba(255,255,255,0.15); }
+.session-restore-box { spacing: 4px; }
+.session-restore-close { padding: 3px; border-radius: 99px; color: rgba(255,255,255,0.6); }
+.session-restore-close:hover { background-color: rgba(255,255,255,0.15); color: #fff; }

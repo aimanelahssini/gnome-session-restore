@@ -88,10 +88,29 @@ async function run(ext) {
     check(label === '↻ Restore 4 apps', `button: ${label}`);
 
     // 3. Restore and check where each window lands.
+    const readyNotices = () => Main.messageTray.getSources()
+        .filter(src => src.constructor.name === 'WindowAttentionSource').length;
+    // GNOME asks for attention when it refuses focus to a new window, which needs recent
+    // user input; nobody types here, so ask for it the way GNOME would.
+    const askId = global.display.connect('window-created', (d, w) => {
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+            if (w.get_compositor_private() && !w.has_focus())
+                w.set_demands_attention();
+            return GLib.SOURCE_REMOVE;
+        });
+    });
+    let maxReady = 0;
+    const readyId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+        maxReady = Math.max(maxReady, readyNotices());
+        return GLib.SOURCE_CONTINUE;
+    });
     ext._restore();
     check(await waitFor(() => terminals().length === 4 && titled() === 3, 45000),
         `4 terminals back: ${terminals().map(w => JSON.stringify(w.get_title())).join(', ')}`);
     await sleep(3000);
+    GLib.source_remove(readyId);
+    global.display.disconnect(askId);
+    check(readyNotices() === 0, `no "is ready" notifications left after restore (${readyNotices()}; at most ${maxReady} at once)`);
     for (const w of terminals()) {
         const t = titleOf(w);
         const [desk, x, y] = LAYOUT[t];

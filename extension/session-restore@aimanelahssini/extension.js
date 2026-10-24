@@ -409,10 +409,22 @@ export default class SessionRestoreExtension extends Extension {
         placeWindow(w, g);
         log(`placed ${id} on desktop ${g.workspace + 1} at ${g.x},${g.y} ${g.width}x${g.height}` +
             `${g.maximized ? ' (maximized)' : ''}`);
+        // A window that opens without focus asks for attention, which GNOME shows as a
+        // "… is ready" notification that stays until you visit it. Restored windows aren't news.
+        // (After an idle: Mutter notifies before GNOME creates the notification, and
+        // clearing it then would leave the notification behind.)
+        const quiet = () => GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            if (w.get_compositor_private() && w.demands_attention)
+                w.unset_demands_attention();
+            return GLib.SOURCE_REMOVE;
+        });
+        quiet();
+        const quietId = w.connect('notify::demands-attention', quiet);
         // Once more shortly after, in case the app repositions itself on startup.
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, PLACE_AGAIN_MS, () => {
             if (!w.get_compositor_private())
                 return GLib.SOURCE_REMOVE;  // window already closed
+            w.disconnect(quietId);
             const r = w.get_frame_rect();
             const wrongDesk = g.workspace >= 0 && w.get_workspace()?.index() !== g.workspace;
             const moved = !g.maximized && !g.fullscreen && (r.x !== g.x || r.y !== g.y ||

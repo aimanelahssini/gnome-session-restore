@@ -24,6 +24,12 @@ const PLACE_WINDOW = 120;       // seconds after Restore during which new window
 const PLACE_AGAIN_MS = 1200;    // apps like Firefox move their own window just after it appears
 const TERMINAL_WAIT = 10;       // seconds to wait for a reopened terminal window before the next
 const TITLE_TAIL = 512 * 1024;  // bytes at the end of a chat's transcript searched for its title
+const TABS_WAIT = 10;           // seconds the tab reader may take
+const TAB_WAIT = 5;             // seconds to wait for one reopened tab before the next
+// Ptyxis adds the command to a tab's title, so a chat reopened by Restore names itself.
+const RESUME = /\bclaude\b.*--resume[ =]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/;
+// A shell's own title is "user@host:folder".
+const SHELL_TITLE = /^[^@\s]+@[^:\s]+:(.+)$/;
 
 function readJson(path) {
     try {
@@ -117,6 +123,22 @@ function showsTitle(windowTitle, title) {
     return !!title && (windowTitle === title || windowTitle.startsWith(`${title} — `));
 }
 
+// The folder a plain terminal tab was in, from its shell's title; home if unknown.
+function tabFolder(title) {
+    const m = bareTitle(title).replace(/ — .*/, '').match(SHELL_TITLE);
+    const dir = m ? m[1].replace(/^~(?=\/|$)/, HOME) : HOME;
+    return GLib.file_test(dir, GLib.FileTest.IS_DIR) ? dir : HOME;
+}
+
+// The ptyxis command for one saved tab: a new window for the first, then tabs in it.
+function tabArgv(tab, first) {
+    const cwd = GLib.file_test(tab.cwd ?? '', GLib.FileTest.IS_DIR) ? tab.cwd : HOME;
+    const cmd = tab.sessionId && `claude --resume ${GLib.shell_quote(tab.sessionId)}; exec bash`;
+    if (first)
+        return ['ptyxis', '--new-window', '-d', cwd, ...cmd ? ['--', 'bash', '-lic', cmd] : []];
+    return ['ptyxis', '--tab', '-d', cwd, ...cmd ? ['-x', `bash -lic ${GLib.shell_quote(cmd)}`] : []];
+}
+
 function transcriptFile(chat) {
     const dir = chat.cwd.replace(/[^A-Za-z0-9]/g, '-');
     return Gio.File.new_for_path(GLib.build_filenamev([HOME, '.claude', 'projects', dir, `${chat.sessionId}.jsonl`]));
@@ -141,17 +163,26 @@ function readChatTitle(file, size) {
     }
 }
 
-// Snapshots from before chats kept their own window: share the terminal's windows out in order.
+// Older snapshots: first (v1) only the terminal's windows, shared out to chats in order; then
+// (v2) a window per chat plus plain terminals. Now (v3) terminal windows with their tabs.
 function upgrade(snap) {
-    if (snap.terminals)
+    if (snap.version >= 3)
         return snap;
-    const term = (snap.apps || []).find(a => a.id === TERMINAL);
-    const pool = [...term?.geometry ?? []];
+    let apps = snap.apps || [], claude = snap.claude || [], plain = snap.terminals;
+    if (!plain) {
+        const term = apps.find(a => a.id === TERMINAL);
+        const pool = [...term?.geometry ?? []];
+        apps = apps.filter(a => a !== term);
+        claude = claude.map(c => ({...c, geometry: pool.shift()}));
+        plain = pool;
+    }
     return {
-        ...snap,
-        apps: (snap.apps || []).filter(a => a !== term),
-        claude: (snap.claude || []).map(c => ({...c, geometry: pool.shift()})),
-        terminals: pool,
+        ...snap, version: 3, apps,
+        claude: claude.map(({sessionId, cwd}) => ({sessionId, cwd})),
+        terminals: [
+            ...claude.map(({sessionId, cwd, geometry}) => ({geometry, tabs: [{sessionId, cwd}]})),
+            ...plain.map(geometry => ({geometry, tabs: [{cwd: HOME}]})),
+        ],
     };
 }
 
@@ -184,7 +215,7 @@ export default class SessionRestoreExtension extends Extension {
                 this._onAppOpened();
         });
         this._periodId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, SAVE_PERIOD, () => {
-            this._save();
+            this._save().catch(logError);
             return GLib.SOURCE_CONTINUE;
         });
         this._scheduleSave();
@@ -207,57 +238,115 @@ export default class SessionRestoreExtension extends Extension {
             GLib.source_remove(this._debounceId);
         this._debounceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, SAVE_DEBOUNCE, () => {
             this._debounceId = null;
-            this._save();
+            this._save().catch(logError);
             return GLib.SOURCE_REMOVE;
         });
     }
 
-    _save() {
-        const apps = this._appSystem.get_running()
-            .filter(a => a.get_id()?.endsWith('.desktop') && a.get_id() !== TERMINAL)
-            .map(a => ({id: a.get_id(), geometry: normalWindows(a).map(windowGeometry)}))
-            .filter(a => a.geometry.length > 0)
-            .map(a => ({...a, windows: a.geometry.length}));
-        const {claude, terminals} = this._terminalLayout();
-        if (!apps.length && !claude.length && !terminals.length)
-            return;     // never replace a good snapshot with an empty desktop
-        GLib.mkdir_with_parents(STATE_DIR, 0o700);
-        const workspaces = global.workspace_manager.get_n_workspaces();
-        const data = {session: this._session, savedAt: Date.now(), workspaces, apps, claude, terminals};
-        GLib.file_set_contents(SNAPSHOT, JSON.stringify(data, null, 1));
+    async _save() {
+        if (this._saving)
+            return;
+        this._saving = true;
+        try {
+            const terminal = this._appSystem.lookup_app(TERMINAL);
+            const frames = terminal && normalWindows(terminal).length ? await this._readTabs() : [];
+            if (!this._appSystem)
+                return;     // disabled meanwhile
+            const apps = this._appSystem.get_running()
+                .filter(a => a.get_id()?.endsWith('.desktop') && a.get_id() !== TERMINAL)
+                .map(a => ({id: a.get_id(), geometry: normalWindows(a).map(windowGeometry)}))
+                .filter(a => a.geometry.length > 0)
+                .map(a => ({...a, windows: a.geometry.length}));
+            const {claude, terminals} = this._terminalLayout(frames);
+            if (!apps.length && !claude.length && !terminals.length)
+                return;     // never replace a good snapshot with an empty desktop
+            GLib.mkdir_with_parents(STATE_DIR, 0o700);
+            const workspaces = global.workspace_manager.get_n_workspaces();
+            const data = {version: 3, session: this._session, savedAt: Date.now(), workspaces, apps, claude, terminals};
+            GLib.file_set_contents(SNAPSHOT, JSON.stringify(data, null, 1));
+        } finally {
+            this._saving = false;
+        }
     }
 
-    // Each Claude chat gets the terminal window it's running in, found by the title Claude
-    // gives that window; chats without a match take the leftover windows in order. Windows
-    // left after that are plain terminals.
-    _terminalLayout() {
-        const app = this._appSystem.lookup_app(TERMINAL);
-        const windows = app ? normalWindows(app).map(w => ({title: bareTitle(w.get_title()), geometry: windowGeometry(w)})) : [];
-        const free = new Set(windows);
-        const chats = claudeChats();
-        for (const chat of chats) {
-            const title = this._chatTitle(chat, windows);
-            const w = [...free].find(x => showsTitle(x.title, title));
-            if (w) {
-                chat.geometry = w.geometry;
-                free.delete(w);
+    // Ptyxis's windows and their tabs, from ptyxis-tabs.py; null if it can't tell.
+    _readTabs() {
+        return new Promise(resolve => {
+            let proc, timeoutId;
+            try {
+                proc = Gio.Subprocess.new(['python3', '-I', GLib.build_filenamev([this.path, 'ptyxis-tabs.py'])],
+                    Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE);
+            } catch {
+                resolve(null);
+                return;
             }
-        }
-        for (const chat of chats.filter(c => !c.geometry)) {
-            const w = free.values().next().value;
-            if (!w)
-                break;
-            chat.geometry = w.geometry;
-            free.delete(w);
-        }
-        return {claude: chats, terminals: [...free].map(w => w.geometry)};
+            timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, TABS_WAIT, () => {
+                timeoutId = null;
+                proc.force_exit();
+                return GLib.SOURCE_REMOVE;
+            });
+            proc.communicate_utf8_async(null, null, (p, res) => {
+                if (timeoutId)
+                    GLib.source_remove(timeoutId);
+                try {
+                    const [, out] = p.communicate_utf8_finish(res);
+                    resolve(p.get_successful() ? JSON.parse(out) : null);
+                } catch {
+                    resolve(null);
+                }
+            });
+        });
     }
 
-    // Cached; the transcript is only read again when no window shows the known title and
-    // the transcript has grown since.
-    _chatTitle(chat, windows) {
+    // Every terminal window with its tabs in order. Ptyxis's view of a window is matched to
+    // GNOME's by title; without it a window counts as one tab. A tab holds a Claude chat if
+    // its title names the chat ("claude --resume ID") or shows the chat's title; leftover
+    // chats take tabs that run claude, then get a window of their own. Other tabs are plain
+    // terminals, kept with their folder.
+    _terminalLayout(frames) {
+        const app = this._appSystem.lookup_app(TERMINAL);
+        const pool = [...frames ?? []];
+        const windows = (app ? normalWindows(app) : []).map(w => {
+            const title = (w.get_title() || '').trim();
+            const i = pool.findIndex(f => f.title.trim() === title);
+            const tabs = i >= 0 ? pool.splice(i, 1)[0].tabs : [title];
+            return {geometry: windowGeometry(w), tabs: tabs.map(t => ({title: t.trim()}))};
+        });
+        const tabs = windows.flatMap(w => w.tabs);
+        const chats = claudeChats();
+        const byId = new Map(chats.map(c => [c.sessionId, c]));
+        for (const tab of tabs) {
+            const chat = byId.get(tab.title.match(RESUME)?.[1]);
+            if (chat && !chat.placed)
+                [tab.chat, chat.placed] = [chat, true];
+        }
+        const titles = tabs.map(t => bareTitle(t.title));
+        for (const chat of chats.filter(c => !c.placed)) {
+            const title = this._chatTitle(chat, titles);
+            const tab = tabs.find(t => !t.chat && showsTitle(bareTitle(t.title), title));
+            if (tab)
+                [tab.chat, chat.placed] = [chat, true];
+        }
+        for (const chat of chats.filter(c => !c.placed)) {
+            const tab = tabs.find(t => !t.chat && / — claude\b/.test(t.title));
+            if (tab)
+                [tab.chat, chat.placed] = [chat, true];
+        }
+        const saved = t => (t.chat ? {sessionId: t.chat.sessionId, cwd: t.chat.cwd} : {cwd: tabFolder(t.title)});
+        return {
+            claude: chats.map(({sessionId, cwd}) => ({sessionId, cwd})),
+            terminals: [
+                ...windows.map(w => ({geometry: w.geometry, tabs: w.tabs.map(saved)})),
+                ...chats.filter(c => !c.placed).map(({sessionId, cwd}) => ({tabs: [{sessionId, cwd}]})),
+            ],
+        };
+    }
+
+    // Cached; the transcript is only read again when no tab shows the known title and the
+    // transcript has grown since.
+    _chatTitle(chat, titles) {
         const cached = this._titles.get(chat.sessionId);
-        if (windows.some(w => showsTitle(w.title, cached?.title)))
+        if (titles.some(t => showsTitle(t, cached?.title)))
             return cached.title;
         const file = transcriptFile(chat);
         let size = -1;
@@ -271,20 +360,24 @@ export default class SessionRestoreExtension extends Extension {
         return title;
     }
 
-    // What Restore would open right now: apps that aren't running yet, Claude chats that
-    // aren't open, and plain terminals if no terminal is open yet.
+    // What Restore would open right now: apps that aren't running yet, and terminal windows
+    // with the tabs whose Claude chats aren't open, plus plain tabs if no terminal is open yet.
     _plan(snap) {
         snap = upgrade(snap);
         const open = new Set(claudeChats().map(c => c.sessionId));
-        // (adding each chat to `open` also drops duplicates)
-        const chats = (snap.claude || []).filter(c => !open.has(c.sessionId) && open.add(c.sessionId));
-        const terminal = this._appSystem.lookup_app(TERMINAL);
-        const terminals = terminal?.state === Shell.AppState.STOPPED ? snap.terminals : [];
+        const plainToo = this._appSystem.lookup_app(TERMINAL)?.state === Shell.AppState.STOPPED;
+        const terminals = [];
+        for (const w of snap.terminals) {
+            // (adding each chat to `open` also drops duplicates)
+            const tabs = w.tabs.filter(t => (t.sessionId ? !open.has(t.sessionId) && open.add(t.sessionId) : plainToo));
+            if (tabs.length)
+                terminals.push({...w, tabs});
+        }
         const apps = (snap.apps || []).filter(a => {
             const app = this._appSystem.lookup_app(a.id);
             return app && app.state === Shell.AppState.STOPPED;
         });
-        return {apps, chats, terminals};
+        return {apps, terminals};
     }
 
     _dismiss() {
@@ -298,10 +391,11 @@ export default class SessionRestoreExtension extends Extension {
 
     _showButton(snap) {
         this._snap = snap;
-        const {apps, chats, terminals} = this._plan(snap);
-        const n = apps.length + chats.length + terminals.length;
-        log(`restore offers ${n}: ${[...apps.map(a => a.id), ...chats.map(c => `claude ${c.sessionId.slice(0, 8)}`),
-            ...terminals.map(() => 'terminal')].join(', ')}`);
+        const {apps, terminals} = this._plan(snap);
+        const tabs = terminals.flatMap(w => w.tabs);
+        const n = apps.length + tabs.length;
+        log(`restore offers ${n}: ${[...apps.map(a => a.id),
+            ...terminals.map(w => `[${w.tabs.map(t => (t.sessionId ? `claude ${t.sessionId.slice(0, 8)}` : 'terminal')).join(', ')}]`)].join(', ')}`);
         if (n === 0) {
             GLib.unlink(PENDING);
             return;
@@ -370,7 +464,7 @@ export default class SessionRestoreExtension extends Extension {
         });
     }
 
-    // Opens the next chat or plain terminal once the previous one's window has appeared.
+    // Opens the next terminal window once the previous one has appeared with its tabs.
     _nextTerminal() {
         if (this._termTimeout)
             GLib.source_remove(this._termTimeout);
@@ -397,15 +491,49 @@ export default class SessionRestoreExtension extends Extension {
     _place(w, id) {
         if (w.get_window_type() !== Meta.WindowType.NORMAL)
             return;
-        let g;
         if (id === TERMINAL && this._termJob) {
-            g = this._termJob.geometry;
-            this._nextTerminal();
-        } else {
-            g = this._pending?.get(id)?.shift();
-        }
-        if (!g)
+            const job = this._termJob;
+            this._termJob = null;
+            if (this._termTimeout)
+                GLib.source_remove(this._termTimeout);
+            this._termTimeout = null;
+            // Tabs first, while this is still Ptyxis's newest window: "--tab" opens in the
+            // active one, and moving a window to another desktop hands focus to another.
+            this._openTabs(job.tabs).then(() => {
+                if (job.geometry)
+                    this._placeAt(w, id, job.geometry);
+                this._nextTerminal();
+            });
             return;
+        }
+        const g = this._pending?.get(id)?.shift();
+        if (g)
+            this._placeAt(w, id, g);
+    }
+
+    // Runs each "ptyxis --tab" in turn, so the tabs keep their order.
+    async _openTabs(argvs) {
+        for (const argv of argvs) {
+            await new Promise(resolve => {
+                const timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, TAB_WAIT, () => {
+                    resolve();
+                    return GLib.SOURCE_REMOVE;
+                });
+                try {
+                    Gio.Subprocess.new(argv, Gio.SubprocessFlags.NONE).wait_async(null, () => {
+                        GLib.source_remove(timeoutId);
+                        resolve();
+                    });
+                } catch (e) {
+                    log(`could not open a tab: ${e.message}`);
+                    GLib.source_remove(timeoutId);
+                    resolve();
+                }
+            });
+        }
+    }
+
+    _placeAt(w, id, g) {
         placeWindow(w, g);
         log(`placed ${id} on desktop ${g.workspace + 1} at ${g.x},${g.y} ${g.width}x${g.height}` +
             `${g.maximized ? ' (maximized)' : ''}`);
@@ -450,19 +578,19 @@ export default class SessionRestoreExtension extends Extension {
     _restore() {
         this._restoring = true;
         const snap = this._snap;
-        const {apps, chats, terminals} = this._plan(snap);
-        log(`restoring ${apps.length} app(s), ${chats.length} chat(s) and ${terminals.length} terminal(s) ` +
-            `on ${snap.workspaces ?? '?'} desktop(s)`);
+        const {apps, terminals} = this._plan(snap);
+        log(`restoring ${apps.length} app(s) and ${terminals.length} terminal window(s) with ` +
+            `${terminals.flatMap(w => w.tabs).length} tab(s) on ${snap.workspaces ?? '?'} desktop(s)`);
         if (snap.workspaces)
             ensureWorkspaces(snap.workspaces);
         this._startPlacing(upgrade(snap).apps || []);
         for (const {id} of apps)
             this._appSystem.lookup_app(id)?.activate();
-        this._termJobs = [
-            ...chats.map(({sessionId, cwd, geometry}) => ({geometry, argv: ['ptyxis', '--new-window', '-d', cwd,
-                '--', 'bash', '-lic', `claude --resume ${GLib.shell_quote(sessionId)}; exec bash`]})),
-            ...terminals.map(geometry => ({geometry, argv: ['ptyxis', '--new-window']})),
-        ];
+        this._termJobs = terminals.map(({geometry, tabs}) => ({
+            geometry,
+            argv: tabArgv(tabs[0], true),
+            tabs: tabs.slice(1).map(t => tabArgv(t, false)),
+        }));
         this._nextTerminal();
         this._dismiss();
     }

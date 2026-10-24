@@ -19,8 +19,11 @@ your apps, where their windows were, and your Claude Code chats.</p>
 - **Brings back Claude Code chats.** Every [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
   chat that was running reopens in its own terminal window, in the same folder, with its
   full history (`claude --resume`), on the desktop and at the spot where *that* chat was.
-  Each chat is matched to its window by the title Claude gives the window. Plain terminals
-  come back too, as fresh shells.
+- **Keeps terminal tabs together.** A terminal window with several tabs comes back as one
+  window with the same tabs in the same order: each Claude chat in its own tab, and plain
+  shells in the folder they were in. Ptyxis's tabs are read through the accessibility bus
+  (`ptyxis-tabs.py`), and each chat is matched to its tab by the `claude --resume ID` or the
+  chat title Ptyxis shows on it.
 - **Survives reboots and reloads.** The offer is kept for the login it belongs to until you
   click it, dismiss it or it times out, even if the screen locks or GNOME reloads its extensions.
 - **Gets out of the way.** The button uses your accent color (Settings → Appearance) and
@@ -53,9 +56,10 @@ button appears from the following login on.
 
 ## Tests
 
-`tests/shell/run.sh` opens fake Claude chats and a plain terminal in a throwaway headless
-GNOME Shell, spreads them over desktops, saves, closes them, restores, and checks that each
-window is back on its own desktop. Your real settings aren't touched.
+`tests/shell/run.sh` opens terminal windows with tabs (fake Claude chats and plain shells)
+in a throwaway headless GNOME Shell, spreads them over desktops, saves, closes them,
+restores, and checks that each window is back on its own desktop with the same tabs in the
+same order. Your real settings aren't touched.
 
 ## Privacy
 

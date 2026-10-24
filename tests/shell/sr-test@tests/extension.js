@@ -129,7 +129,7 @@ async function runTest(ext) {
     ext.disable();
     ext.enable();
     const label = ext._button?.get_children()?.[0]?.get_first_child()?.label;
-    check(label === '↻ Restore 6 apps', `button: ${label}`);
+    check(label === '↻ Restore 4 windows', `button: ${label}`);
 
     // 3. Restore and check each window's desktop, place and tabs.
     // GNOME asks for attention when it refuses focus to a new window, which needs recent

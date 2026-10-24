@@ -5,7 +5,7 @@
 <p align="center">GNOME forgets everything when you log out. This brings it back with one click:<br>
 your apps, where their windows were, and your Claude Code chats.</p>
 
-<p align="center"><img src="docs/restore.svg" alt="A Restore 3 apps button in the top bar; a browser and two terminals reopen in the dashed outlines of their old positions, the terminals resuming Claude Code chats"></p>
+<p align="center"><img src="docs/restore.svg" alt="A Restore 3 windows button in the top bar; a browser and two terminals reopen in the dashed outlines of their old positions, the terminals resuming Claude Code chats"></p>
 
 ## What it does
 
@@ -33,8 +33,9 @@ your apps, where their windows were, and your Claude Code chats.</p>
 
 ## What it doesn't do
 
-- It doesn't restore what's *inside* apps: tabs, documents, scroll positions. Many apps
-  handle that themselves (in Firefox: Settings → General → *Open previous windows and tabs*).
+- Apart from terminal tabs, it doesn't restore what's *inside* apps: browser tabs, documents,
+  scroll positions. Many apps handle that themselves (in Firefox: Settings → General →
+  *Open previous windows and tabs*).
 - Unsaved work is still lost when you log out.
 - Claude chats are reopened in **Ptyxis**, Fedora's default terminal. Other terminals need a
   small change to the `ptyxis` command in `extension.js`.

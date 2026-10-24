@@ -392,8 +392,9 @@ export default class SessionRestoreExtension extends Extension {
     _showButton(snap) {
         this._snap = snap;
         const {apps, terminals} = this._plan(snap);
-        const tabs = terminals.flatMap(w => w.tabs);
-        const n = apps.length + tabs.length;
+        // Windows, as you'll see them: an app's windows, and each terminal window once
+        // however many tabs it has.
+        const n = apps.reduce((sum, a) => sum + (a.geometry?.length || 1), 0) + terminals.length;
         log(`restore offers ${n}: ${[...apps.map(a => a.id),
             ...terminals.map(w => `[${w.tabs.map(t => (t.sessionId ? `claude ${t.sessionId.slice(0, 8)}` : 'terminal')).join(', ')}]`)].join(', ')}`);
         if (n === 0) {
@@ -402,7 +403,7 @@ export default class SessionRestoreExtension extends Extension {
         }
         this._button = new PanelMenu.Button(0.0, 'Session Restore', true);
         const btn = new St.Button({style_class: 'session-restore-btn',
-            label: `↻ Restore ${n} ${n === 1 ? 'app' : 'apps'}`, y_align: Clutter.ActorAlign.CENTER});
+            label: `↻ Restore ${n} ${n === 1 ? 'window' : 'windows'}`, y_align: Clutter.ActorAlign.CENTER});
         btn.connect('clicked', () => this._restore());
         // Small × beside the pill: skip restoring for this login.
         const close = new St.Button({style_class: 'session-restore-close', y_align: Clutter.ActorAlign.CENTER,

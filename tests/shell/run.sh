@@ -7,6 +7,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 UUID=session-restore@aimanelahssini
 T="$(mktemp -d)"
+trap 'rm -rf "$T"' EXIT   # also when a run is stopped early
 OUT="$(mkdir -p "${1:-$T/out}" && cd "${1:-$T/out}" && pwd)"
 mkdir -p "$T"/{home/titles,bin,config/glib-2.0/settings,data/gnome-shell/extensions,state,cache,rt}
 chmod 700 "$T/rt"

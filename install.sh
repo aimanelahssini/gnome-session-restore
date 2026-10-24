@@ -18,4 +18,8 @@ if sys.argv[1] not in l:
     l.append(sys.argv[1])
 subprocess.run(['gsettings', 'set', 'org.gnome.shell', 'enabled-extensions', str(l)], check=True)
 PY
+# Ptyxis reopening its own old windows (as empty shells) would take the chats' places.
+if gsettings list-keys org.gnome.Ptyxis 2>/dev/null | grep -qx restore-session; then
+    gsettings set org.gnome.Ptyxis restore-session false
+fi
 echo "Installed. Log out and back in once so GNOME loads it."

@@ -1,0 +1,9 @@
+#!/bin/bash
+# Ptyxis starts each shell with "systemd-run --user --scope ... COMMAND"; the test session
+# has no systemd, so drop the options and run the command.
+[[ $1 == --version ]] && { echo "systemd 258"; exit; }
+while [[ $1 == -* ]]; do
+    [[ $1 == -- ]] && { shift; break; }
+    shift
+done
+exec "$@"

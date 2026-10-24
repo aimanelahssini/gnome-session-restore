@@ -22,6 +22,8 @@ const HIDE_AFTER = 180;         // button lifetime once you start opening apps
 const LOGIN_GRACE = 10;         // ignore autostart apps right after login
 const PLACE_WINDOW = 120;       // seconds after Restore during which new windows get placed
 const PLACE_AGAIN_MS = 1200;    // apps like Firefox move their own window just after it appears
+const TERMINAL_WAIT = 10;       // seconds to wait for a reopened terminal window before the next
+const TITLE_TAIL = 512 * 1024;  // bytes at the end of a chat's transcript searched for its title
 
 function readJson(path) {
     try {
@@ -86,6 +88,7 @@ function placeWindow(w, g) {
 
 function claudeChats() {
     const chats = [];
+    const seen = new Set();
     try {
         const en = Gio.File.new_for_path(CLAUDE_SESSIONS).enumerate_children('standard::name', 0, null);
         let info;
@@ -94,13 +97,62 @@ function claudeChats() {
             if (!name.endsWith('.json'))
                 continue;
             const s = readJson(GLib.build_filenamev([CLAUDE_SESSIONS, name]));
-            if (!s?.sessionId || s.kind !== 'interactive' ||
+            if (!s?.sessionId || s.kind !== 'interactive' || seen.has(s.sessionId) ||
                 !GLib.file_test(`/proc/${s.pid}`, GLib.FileTest.EXISTS))
                 continue;
+            seen.add(s.sessionId);
             chats.push({sessionId: s.sessionId, cwd: s.cwd || HOME});
         }
     } catch {}
     return chats;
+}
+
+// Claude Code titles its terminal "✳ <chat title>" (a spinner instead of ✳ while it works).
+function bareTitle(title) {
+    return (title || '').replace(/^[^\p{L}\p{N}]+/u, '').trim();
+}
+
+// Ptyxis adds " — claude" when Claude runs under a shell, as in chats reopened by Restore.
+function showsTitle(windowTitle, title) {
+    return !!title && (windowTitle === title || windowTitle.startsWith(`${title} — `));
+}
+
+function transcriptFile(chat) {
+    const dir = chat.cwd.replace(/[^A-Za-z0-9]/g, '-');
+    return Gio.File.new_for_path(GLib.build_filenamev([HOME, '.claude', 'projects', dir, `${chat.sessionId}.jsonl`]));
+}
+
+// The chat's current title, read from the end of its transcript (Claude rewrites it often).
+function readChatTitle(file, size) {
+    try {
+        const stream = file.read(null);
+        stream.seek(Math.max(0, size - TITLE_TAIL), GLib.SeekType.SET, null);
+        const parts = [];
+        let bytes;
+        while ((bytes = stream.read_bytes(65536, null)).get_size() > 0)
+            parts.push(new TextDecoder().decode(bytes.toArray()));
+        stream.close(null);
+        const text = parts.join('');
+        const last = key => [...text.matchAll(new RegExp(`"${key}":"((?:[^"\\\\]|\\\\.)*)"`, 'g'))].pop();
+        const m = last('customTitle') ?? last('aiTitle');
+        return m ? JSON.parse(`"${m[1]}"`) : null;
+    } catch {
+        return null;
+    }
+}
+
+// Snapshots from before chats kept their own window: share the terminal's windows out in order.
+function upgrade(snap) {
+    if (snap.terminals)
+        return snap;
+    const term = (snap.apps || []).find(a => a.id === TERMINAL);
+    const pool = [...term?.geometry ?? []];
+    return {
+        ...snap,
+        apps: (snap.apps || []).filter(a => a !== term),
+        claude: (snap.claude || []).map(c => ({...c, geometry: pool.shift()})),
+        terminals: pool,
+    };
 }
 
 export default class SessionRestoreExtension extends Extension {
@@ -108,6 +160,7 @@ export default class SessionRestoreExtension extends Extension {
         this._appSystem = Shell.AppSystem.get_default();
         this._session = sessionKey();
         this._enabledAt = GLib.get_monotonic_time();
+        this._titles = new Map();   // sessionId -> {size, title} of its transcript
 
         // Before saving anything, set the previous login's snapshot aside for this login.
         let pending = readJson(PENDING);
@@ -161,33 +214,77 @@ export default class SessionRestoreExtension extends Extension {
 
     _save() {
         const apps = this._appSystem.get_running()
-            .filter(a => a.get_id()?.endsWith('.desktop'))
+            .filter(a => a.get_id()?.endsWith('.desktop') && a.get_id() !== TERMINAL)
             .map(a => ({id: a.get_id(), geometry: normalWindows(a).map(windowGeometry)}))
             .filter(a => a.geometry.length > 0)
             .map(a => ({...a, windows: a.geometry.length}));
-        const claude = claudeChats();
-        if (!apps.length && !claude.length)
+        const {claude, terminals} = this._terminalLayout();
+        if (!apps.length && !claude.length && !terminals.length)
             return;     // never replace a good snapshot with an empty desktop
         GLib.mkdir_with_parents(STATE_DIR, 0o700);
         const workspaces = global.workspace_manager.get_n_workspaces();
-        const data = {session: this._session, savedAt: Date.now(), workspaces, apps, claude};
+        const data = {session: this._session, savedAt: Date.now(), workspaces, apps, claude, terminals};
         GLib.file_set_contents(SNAPSHOT, JSON.stringify(data, null, 1));
     }
 
-    // What Restore would open right now: apps that aren't running yet, and Claude chats that
-    // aren't open. Terminal windows that held chats come back with those chats, so they
-    // aren't opened (or counted) a second time.
+    // Each Claude chat gets the terminal window it's running in, found by the title Claude
+    // gives that window; chats without a match take the leftover windows in order. Windows
+    // left after that are plain terminals.
+    _terminalLayout() {
+        const app = this._appSystem.lookup_app(TERMINAL);
+        const windows = app ? normalWindows(app).map(w => ({title: bareTitle(w.get_title()), geometry: windowGeometry(w)})) : [];
+        const free = new Set(windows);
+        const chats = claudeChats();
+        for (const chat of chats) {
+            const title = this._chatTitle(chat, windows);
+            const w = [...free].find(x => showsTitle(x.title, title));
+            if (w) {
+                chat.geometry = w.geometry;
+                free.delete(w);
+            }
+        }
+        for (const chat of chats.filter(c => !c.geometry)) {
+            const w = free.values().next().value;
+            if (!w)
+                break;
+            chat.geometry = w.geometry;
+            free.delete(w);
+        }
+        return {claude: chats, terminals: [...free].map(w => w.geometry)};
+    }
+
+    // Cached; the transcript is only read again when no window shows the known title and
+    // the transcript has grown since.
+    _chatTitle(chat, windows) {
+        const cached = this._titles.get(chat.sessionId);
+        if (windows.some(w => showsTitle(w.title, cached?.title)))
+            return cached.title;
+        const file = transcriptFile(chat);
+        let size = -1;
+        try {
+            size = file.query_info('standard::size', 0, null).get_size();
+        } catch {}
+        if (cached?.size === size)
+            return cached.title;
+        const title = size > 0 ? readChatTitle(file, size) : null;
+        this._titles.set(chat.sessionId, {size, title});
+        return title;
+    }
+
+    // What Restore would open right now: apps that aren't running yet, Claude chats that
+    // aren't open, and plain terminals if no terminal is open yet.
     _plan(snap) {
+        snap = upgrade(snap);
         const open = new Set(claudeChats().map(c => c.sessionId));
-        const allChats = snap.claude || [];
-        const chats = allChats.filter(c => !open.has(c.sessionId));
+        // (adding each chat to `open` also drops duplicates)
+        const chats = (snap.claude || []).filter(c => !open.has(c.sessionId) && open.add(c.sessionId));
+        const terminal = this._appSystem.lookup_app(TERMINAL);
+        const terminals = terminal?.state === Shell.AppState.STOPPED ? snap.terminals : [];
         const apps = (snap.apps || []).filter(a => {
-            if (a.id === TERMINAL && a.windows <= allChats.length)
-                return false;
             const app = this._appSystem.lookup_app(a.id);
             return app && app.state === Shell.AppState.STOPPED;
         });
-        return {apps, chats};
+        return {apps, chats, terminals};
     }
 
     _dismiss() {
@@ -201,9 +298,10 @@ export default class SessionRestoreExtension extends Extension {
 
     _showButton(snap) {
         this._snap = snap;
-        const {apps, chats} = this._plan(snap);
-        const n = apps.length + chats.length;
-        log(`restore offers ${n}: ${[...apps.map(a => a.id), ...chats.map(c => `claude ${c.sessionId.slice(0, 8)}`)].join(', ')}`);
+        const {apps, chats, terminals} = this._plan(snap);
+        const n = apps.length + chats.length + terminals.length;
+        log(`restore offers ${n}: ${[...apps.map(a => a.id), ...chats.map(c => `claude ${c.sessionId.slice(0, 8)}`),
+            ...terminals.map(() => 'terminal')].join(', ')}`);
         if (n === 0) {
             GLib.unlink(PENDING);
             return;
@@ -240,18 +338,17 @@ export default class SessionRestoreExtension extends Extension {
     }
 
     // Windows that appear after Restore are moved back to where the same app's windows
-    // were, in the order they open.
+    // were, in the order they open. Terminals open one at a time (see _nextTerminal), so
+    // each one goes to the place of the chat or terminal it was opened for.
     _startPlacing(apps) {
         this._pending = new Map(apps.filter(a => a.geometry?.length)
             .map(a => [a.id, [...a.geometry]]));
-        if (!this._pending.size)
-            return;
         const tracker = Shell.WindowTracker.get_default();
         this._createdId = global.display.connect('window-created', (d, w) => {
             // A new window starts out as "window:N"; its app is known a moment later.
             let tries = 0;
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
-                if (!this._pending || !w.get_compositor_private())
+                if (!this._createdId || !w.get_compositor_private())
                     return GLib.SOURCE_REMOVE;
                 const id = tracker.get_window_app(w)?.get_id();
                 if (!id?.endsWith('.desktop'))
@@ -260,6 +357,12 @@ export default class SessionRestoreExtension extends Extension {
                 return GLib.SOURCE_REMOVE;
             });
         });
+        this._armPlaceTimeout();
+    }
+
+    _armPlaceTimeout() {
+        if (this._placeTimeout)
+            GLib.source_remove(this._placeTimeout);
         this._placeTimeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, PLACE_WINDOW, () => {
             this._placeTimeout = null;
             this._stopPlacing();
@@ -267,11 +370,42 @@ export default class SessionRestoreExtension extends Extension {
         });
     }
 
-    _place(w, id) {
-        const queue = this._pending?.get(id);
-        if (w.get_window_type() !== Meta.WindowType.NORMAL || !queue?.length)
+    // Opens the next chat or plain terminal once the previous one's window has appeared.
+    _nextTerminal() {
+        if (this._termTimeout)
+            GLib.source_remove(this._termTimeout);
+        this._termTimeout = null;
+        this._termJob = this._termJobs?.shift() ?? null;
+        if (!this._termJob)
             return;
-        const g = queue.shift();
+        this._armPlaceTimeout();
+        try {
+            Gio.Subprocess.new(this._termJob.argv, Gio.SubprocessFlags.NONE);
+        } catch (e) {
+            Main.notify('Session restore', `Could not open a terminal: ${e.message}`);
+            this._nextTerminal();
+            return;
+        }
+        this._termTimeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, TERMINAL_WAIT, () => {
+            this._termTimeout = null;
+            log('a terminal window didn\'t appear in time; opening the next one');
+            this._nextTerminal();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _place(w, id) {
+        if (w.get_window_type() !== Meta.WindowType.NORMAL)
+            return;
+        let g;
+        if (id === TERMINAL && this._termJob) {
+            g = this._termJob.geometry;
+            this._nextTerminal();
+        } else {
+            g = this._pending?.get(id)?.shift();
+        }
+        if (!g)
+            return;
         placeWindow(w, g);
         log(`placed ${id} on desktop ${g.workspace + 1} at ${g.x},${g.y} ${g.width}x${g.height}` +
             `${g.maximized ? ' (maximized)' : ''}`);
@@ -294,31 +428,30 @@ export default class SessionRestoreExtension extends Extension {
     _stopPlacing() {
         if (this._createdId)
             global.display.disconnect(this._createdId);
-        if (this._placeTimeout)
-            GLib.source_remove(this._placeTimeout);
-        this._createdId = this._placeTimeout = null;
-        this._pending = null;
+        for (const id of [this._placeTimeout, this._termTimeout])
+            if (id)
+                GLib.source_remove(id);
+        this._createdId = this._placeTimeout = this._termTimeout = null;
+        this._pending = this._termJobs = this._termJob = null;
     }
 
     _restore() {
         this._restoring = true;
         const snap = this._snap;
-        const {apps, chats} = this._plan(snap);
-        log(`restoring ${apps.length} app(s) and ${chats.length} chat(s) on ${snap.workspaces ?? '?'} desktop(s)`);
+        const {apps, chats, terminals} = this._plan(snap);
+        log(`restoring ${apps.length} app(s), ${chats.length} chat(s) and ${terminals.length} terminal(s) ` +
+            `on ${snap.workspaces ?? '?'} desktop(s)`);
         if (snap.workspaces)
             ensureWorkspaces(snap.workspaces);
-        this._startPlacing(snap.apps || []);
+        this._startPlacing(upgrade(snap).apps || []);
         for (const {id} of apps)
             this._appSystem.lookup_app(id)?.activate();
-        for (const {sessionId, cwd} of chats) {
-            const cmd = `claude --resume ${GLib.shell_quote(sessionId)}; exec bash`;
-            try {
-                Gio.Subprocess.new(['ptyxis', '--new-window', '-d', cwd, '--', 'bash', '-lic', cmd],
-                    Gio.SubprocessFlags.NONE);
-            } catch (e) {
-                Main.notify('Session restore', `Could not reopen Claude chat: ${e.message}`);
-            }
-        }
+        this._termJobs = [
+            ...chats.map(({sessionId, cwd, geometry}) => ({geometry, argv: ['ptyxis', '--new-window', '-d', cwd,
+                '--', 'bash', '-lic', `claude --resume ${GLib.shell_quote(sessionId)}; exec bash`]})),
+            ...terminals.map(geometry => ({geometry, argv: ['ptyxis', '--new-window']})),
+        ];
+        this._nextTerminal();
         this._dismiss();
     }
 }

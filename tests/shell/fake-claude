@@ -1,0 +1,9 @@
+#!/bin/bash
+# Stand-in for Claude Code ("claude --resume ID"): registers a live session like Claude does
+# and titles its terminal from $HOME/titles/ID.
+id=$2
+mkdir -p "$HOME/.claude/sessions"
+echo "{\"pid\":$$,\"sessionId\":\"$id\",\"cwd\":\"$PWD\",\"kind\":\"interactive\"}" > "$HOME/.claude/sessions/$$.json"
+printf '\e]0;%s\a' "$(cat "$HOME/titles/$id")"
+echo "fake claude $id"
+exec sleep infinity

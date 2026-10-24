@@ -1,0 +1,64 @@
+#!/bin/bash
+# Saves and restores fake Claude chats plus a plain terminal in a throwaway headless GNOME
+# Shell. Settings go to a keyfile in a temp folder, never to the real dconf.
+#   tests/shell/run.sh [OUT_DIR]     results.txt and shell.log land in OUT_DIR
+set -e
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+UUID=session-restore@aimanelahssini
+T="$(mktemp -d)"
+OUT="$(mkdir -p "${1:-$T/out}" && cd "${1:-$T/out}" && pwd)"
+mkdir -p "$T"/{home/titles,bin,config/glib-2.0/settings,data/gnome-shell/extensions,state,cache,rt}
+chmod 700 "$T/rt"
+cp -r "$REPO/extension/$UUID" "$HERE/sr-test@tests" "$T/data/gnome-shell/extensions/"
+cp "$HERE/fake-claude" "$T/bin/claude"
+cp "$HERE/fake-systemd-run" "$T/bin/systemd-run"
+
+# Titles the fake chats give their terminals (Beta shows Claude's busy spinner), and
+# transcripts holding those titles. Gamma was renamed and its title sits behind 700 KB.
+H="$T/home"
+P="$H/.claude/projects/$(echo -n "$H" | sed 's/[^A-Za-z0-9]/-/g')"
+mkdir -p "$P"
+echo '✳ Alpha chat' > "$H/titles/alpha-id"
+echo '⠐ Beta chat' > "$H/titles/beta-id"
+echo '✳ Gamma renamed' > "$H/titles/gamma-id"
+echo '{"type":"ai-title","aiTitle":"Alpha chat","sessionId":"alpha-id"}' > "$P/alpha-id.jsonl"
+echo '{"type":"ai-title","aiTitle":"Beta chat","sessionId":"beta-id"}' > "$P/beta-id.jsonl"
+{
+    echo '{"type":"ai-title","aiTitle":"Gamma old","sessionId":"gamma-id"}'
+    python3 -c 'print(("{\"type\":\"user\",\"text\":\"" + "x" * 1000 + "\"}\n") * 700, end="")'
+    echo '{"type":"custom-title","customTitle":"Gamma renamed","sessionId":"gamma-id"}'
+    echo '{"type":"ai-title","aiTitle":"Gamma newer","sessionId":"gamma-id"}'
+} > "$P/gamma-id.jsonl"
+
+cat > "$T/config/glib-2.0/settings/keyfile" <<KEYS
+[org/gnome/shell]
+enabled-extensions=['$UUID', 'sr-test@tests']
+disable-user-extensions=false
+welcome-dialog-last-shown-version='999'
+
+[org/gnome/mutter]
+dynamic-workspaces=false
+
+[org/gnome/desktop/wm/preferences]
+num-workspaces=4
+
+[org/gnome/Ptyxis]
+restore-session=false
+KEYS
+dconf dump / > "$T/dconf-before.txt"
+env -u WAYLAND_DISPLAY -u DISPLAY -u DBUS_SESSION_BUS_ADDRESS \
+    HOME="$H" PATH="$T/bin:$PATH" XDG_CONFIG_HOME="$T/config" XDG_DATA_HOME="$T/data" XDG_STATE_HOME="$T/state" \
+    XDG_CACHE_HOME="$T/cache" XDG_RUNTIME_DIR="$T/rt" GSETTINGS_BACKEND=keyfile TEST_OUT="$OUT" \
+    dbus-run-session -- timeout 150 gnome-shell --headless --wayland --virtual-monitor 1440x900 \
+    > "$OUT/shell.log" 2>&1 || true
+dconf dump / > "$T/dconf-after.txt"
+if diff -q "$T/dconf-before.txt" "$T/dconf-after.txt" > /dev/null; then
+    echo "real dconf: unchanged"
+else
+    echo "REAL DCONF CHANGED"
+fi
+grep -E 'JS ERROR|TypeError|ReferenceError|SyntaxError' "$OUT/shell.log" | head -5 || true
+grep 'session-restore:' "$OUT/shell.log" | sed 's/.*session-restore: /  log: /' || true
+cat "$OUT/results.txt" 2>/dev/null
+rm -rf "$T"

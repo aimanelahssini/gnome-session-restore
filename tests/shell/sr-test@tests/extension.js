@@ -2,6 +2,7 @@
 // them over desktops, saves, closes them, fakes a new login, restores, and checks that every
 // window is back on its desktop with the same tabs in the same order. Results go to
 // $TEST_OUT/results.txt.
+import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
@@ -93,7 +94,74 @@ async function tabsByWindow(ext) {
     });
 }
 
+// SR_TEST=edge: clicks on the very top pixel row of the panel (and the bottom one) must
+// still hit the pill or the ×, not the dead border around them.
+async function edgeTest(ext) {
+    GLib.mkdir_with_parents(`${HOME}/.local/state/session-restore`, 0o755);
+    const offer = () => {
+        GLib.unlink(`${HOME}/.local/state/session-restore/pending.json`);
+        GLib.file_set_contents(SNAPSHOT, JSON.stringify({version: 3, session: 'previous-login', savedAt: Date.now(),
+            apps: [], terminals: [{tabs: [{cwd: HOME}]}]}));
+        ext.disable();
+        ext.enable();
+    };
+    const seat = (global.stage.context?.get_backend() ?? global.backend).get_default_seat();
+    const ptr = seat.create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
+    const click = async (x, y) => {
+        ptr.notify_absolute_motion(GLib.get_monotonic_time(), x, y);
+        await sleep(200);
+        ptr.notify_button(GLib.get_monotonic_time(), Clutter.BUTTON_PRIMARY, Clutter.ButtonState.PRESSED);
+        await sleep(80);
+        ptr.notify_button(GLib.get_monotonic_time(), Clutter.BUTTON_PRIMARY, Clutter.ButtonState.RELEASED);
+        await sleep(400);
+    };
+    let restored = 0;
+    ext._restore = () => {
+        restored++;
+        ext._dismiss();
+    };
+    const parts = () => {
+        const box = ext._button.get_children()[0];
+        const [pill, close] = box.get_children();
+        const geo = a => {
+            const [x, y] = a.get_transformed_position();
+            const [w, h] = a.get_transformed_size();
+            return {x, y, w, h};
+        };
+        return {pill: geo(pill), close: geo(close), panelH: Main.panel.height};
+    };
+
+    for (const [what, yOf] of [['top edge (y=0)', () => 0], ['bottom edge', p => p.panelH - 1]]) {
+        offer();
+        await sleep(500);
+        let p = parts();
+        out(`  pill at y=${p.pill.y}..${p.pill.y + p.pill.h}, panel ${p.panelH}px`);
+        check(p.pill.y > 0, `pill doesn't reach the top itself (y=${p.pill.y})`);
+        const before = restored;
+        await click(p.pill.x + p.pill.w / 2, yOf(p));
+        check(restored === before + 1 && !ext._button, `${what} above/below the pill restores`);
+
+        offer();
+        await sleep(500);
+        p = parts();
+        await click(p.close.x + p.close.w / 2, yOf(p));
+        check(restored === before + 1 && !ext._button &&
+            !GLib.file_test(`${HOME}/.local/state/session-restore/pending.json`, GLib.FileTest.EXISTS),
+            `${what} above/below the × declines`);
+    }
+    // Clicking the pill itself still works.
+    offer();
+    await sleep(500);
+    const p = parts();
+    const before = restored;
+    await click(p.pill.x + p.pill.w / 2, p.pill.y + p.pill.h / 2);
+    check(restored === before + 1, 'pill middle restores');
+    out(failed ? `${failed} FAILED` : 'ALL PASSED');
+}
+
 async function runTest(ext) {
+    if (GLib.getenv('SR_TEST') === 'edge')
+        return edgeTest(ext);
     await sleep(2000);
     Main.overview.hide();
 

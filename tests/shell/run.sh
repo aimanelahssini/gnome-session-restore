@@ -2,6 +2,7 @@
 # Saves and restores terminal windows with tabs (fake Claude chats and plain shells) in a
 # throwaway headless GNOME Shell. Settings go to a keyfile in a temp folder, never to the real dconf.
 #   tests/shell/run.sh [OUT_DIR]     results.txt and shell.log land in OUT_DIR
+#   SR_TEST=edge tests/shell/run.sh    only checks clicks on the panel's top/bottom edge
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -54,7 +55,7 @@ KEYS
 dconf dump / > "$T/dconf-before.txt"
 env -u WAYLAND_DISPLAY -u DISPLAY -u DBUS_SESSION_BUS_ADDRESS \
     HOME="$H" PATH="$T/bin:$PATH" XDG_CONFIG_HOME="$T/config" XDG_DATA_HOME="$T/data" XDG_STATE_HOME="$T/state" \
-    XDG_CACHE_HOME="$T/cache" XDG_RUNTIME_DIR="$T/rt" GSETTINGS_BACKEND=keyfile TEST_OUT="$OUT" \
+    XDG_CACHE_HOME="$T/cache" XDG_RUNTIME_DIR="$T/rt" GSETTINGS_BACKEND=keyfile TEST_OUT="$OUT" SR_TEST="${SR_TEST:-}" \
     dbus-run-session -- bash -c '/usr/libexec/at-spi-bus-launcher --launch-immediately & sleep 1; /usr/libexec/at-spi2-registryd & exec timeout 180 gnome-shell --headless --wayland --virtual-monitor 1440x900' \
     > "$OUT/shell.log" 2>&1 || true
 dconf dump / > "$T/dconf-after.txt"

@@ -416,6 +416,31 @@ export default class SessionRestoreExtension extends Extension {
         box.add_child(btn);
         box.add_child(close);
         this._button.add_child(box);
+        // The panel button has a 3px transparent border and the pill a 3px margin, so the
+        // top and bottom edges of the panel would otherwise be dead. Clicks there land on
+        // the panel button itself: send them to the pill, or to × if they're in its column.
+        const closeColumn = x => x >= close.get_transformed_position()[0] - 2;
+        const onEdge = (_actor, event) => {
+            const [x] = event.get_coords();
+            if (closeColumn(x))
+                close.emit('clicked', 0);
+            else
+                this._restore();
+            return Clutter.EVENT_STOP;
+        };
+        this._button.connect('button-release-event', onEdge);
+        this._button.connect('touch-event', (actor, event) =>
+            event.type() === Clutter.EventType.TOUCH_END ? onEdge(actor, event) : Clutter.EVENT_PROPAGATE);
+        // Light the pill up whenever the pointer is anywhere over the panel button but ×.
+        const syncHover = () => {
+            if (this._button.hover && !close.hover)
+                btn.add_style_pseudo_class('hover');
+            else
+                btn.remove_style_pseudo_class('hover');
+        };
+        this._button.connect('notify::hover', syncHover);
+        close.connect('notify::hover', syncHover);
+        btn.connect('notify::hover', syncHover);
         Main.panel.addToStatusArea(`${this.uuid}-btn`, this._button, 1, 'left');
     }
 
